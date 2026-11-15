@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is retried up to twice. It honours `Retry-After` if Dialpad sends one, or waits 1 s then 2 s with jitter. Each wait is capped at 10 s and the total at 20 s, and every attempt gets its own timeout. A longer wait is reported at once (`Try again in N s.` when Dialpad says how long).
+
 ## 0.1.0 (unreleased)
 
 First version.

@@ -18,8 +18,13 @@ export class DialpadAuthError extends Error {
   }
 }
 
-/** Dialpad rate-limited the request (HTTP 429). Limits: 20 requests/second per company, most endpoints 1200/minute. */
-export class DialpadRateLimitError extends Error {}
+/** Dialpad rate-limited the request (HTTP 429). Limit: 20 requests/second per company, lower for some endpoints. */
+export class DialpadRateLimitError extends Error {
+  /** Seconds Dialpad asked us to wait (Retry-After), when it said. */
+  constructor(message: string, readonly retryAfterSeconds?: number) {
+    super(message);
+  }
+}
 
 /** Any other non-2xx response. */
 export class DialpadApiError extends Error {

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { logger } from './utils/logger.js';
+import { fetchWithRateLimitRetry, retryAfterSecondsOf } from './rate-limit.js';
 import { DialpadApiError, DialpadAuthError, DialpadRateLimitError } from './types.js';
 import type { DialpadCredentials, HttpMethod } from './types.js';
 
@@ -55,7 +56,10 @@ export async function request<T>(
   if (!path.startsWith('/')) throw new Error(`Dialpad path must start with /: ${path}`);
   const qs = options.query ? buildQuery(options.query).toString() : '';
   const url = `${BASE_URL}${path}${qs ? `?${qs}` : ''}`;
-  const res = await fetch(url, {
+  // A short 429 is retried (bounded, honouring Retry-After) inside
+  // fetchWithRateLimitRetry; each attempt gets its own timeout. Dialpad does
+  // not process a request it rate-limits, so retrying a write is safe.
+  const res = await fetchWithRateLimitRetry(url, `${method} ${path}`, () => ({
     method,
     headers: {
       Authorization: `Bearer ${creds.apiKey}`,
@@ -64,7 +68,7 @@ export async function request<T>(
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
-  });
+  }));
 
   // Paths are logged without the query string: call-history filters and
   // phone numbers stay out of the logs.
@@ -77,8 +81,11 @@ export async function request<T>(
     );
   }
   if (res.status === 429) {
+    const retryAfterSeconds = retryAfterSecondsOf(res);
     throw new DialpadRateLimitError(
-      `Dialpad rate-limited the request (HTTP 429): ${method} ${path}. Wait a minute and try again.`
+      `Dialpad rate-limited the request (HTTP 429): ${method} ${path}.` +
+        (retryAfterSeconds !== undefined ? ` Try again in ${retryAfterSeconds} s.` : ' Wait a minute and try again.'),
+      retryAfterSeconds
     );
   }
   if (!res.ok) {
