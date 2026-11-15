@@ -351,8 +351,10 @@ describe('errors', () => {
     expect(textOf(await call('dialpad_get_company'))).toMatch(/rejected the API key/);
     fetchMock.mockResolvedValueOnce(jsonResponse({}, 403));
     expect(textOf(await call('dialpad_list_numbers'))).toMatch(/company admin key/);
-    fetchMock.mockResolvedValueOnce(jsonResponse({}, 429));
-    expect(textOf(await call('dialpad_get_company'))).toMatch(/rate-limited/);
+    // Retry-After longer than the client waits for: reported at once, not retried.
+    fetchMock.mockResolvedValueOnce(new Response('{}', { status: 429, headers: { 'Retry-After': '60' } }));
+    expect(textOf(await call('dialpad_get_company'))).toMatch(/rate-limited.*Try again in 60 s/);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('includes the Dialpad error message but not the query string', async () => {
