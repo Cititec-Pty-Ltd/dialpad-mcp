@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
-import { runWithCredentials } from '../client.js';
+import { request, runWithCredentials } from '../client.js';
 import { RATE_LIMIT_RETRY, parseRetryAfter, retryDelayMs } from '../rate-limit.js';
 import { jsonResponse, textOf } from './test-helpers.js';
 
@@ -128,5 +128,63 @@ describe('request retry on 429', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.isError).toBe(true);
+  });
+});
+
+describe('writes are never replayed', () => {
+  const fetchMock = vi.fn();
+  const creds = { apiKey: 'key-1' };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', fetchMock);
+    fetchMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  for (const method of ['POST', 'PATCH', 'DELETE'] as const) {
+    it(`${method}: a 429 or a 503 with Retry-After makes one request and says how long to wait`, async () => {
+      fetchMock.mockResolvedValue(limited('2'));
+      await expect(
+        runWithCredentials(creds, () => request(creds, method, '/contacts/1', { body: {} }))
+      ).rejects.toThrow(/HTTP 429.*Try again in 2 s\./);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValue(limited('2', 503));
+      await expect(
+        runWithCredentials(creds, () => request(creds, method, '/contacts/1', { body: {} }))
+      ).rejects.toThrow(/HTTP 503 - rate limit exceeded\. Try again in 2 s\./);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('the stats-export POST is not replayed either', async () => {
+    fetchMock.mockResolvedValue(limited('1'));
+
+    const result = await runWithCredentials(creds, () =>
+      dispatchToolCall('dialpad_create_stats_export', { export_type: 'records', stat_type: 'calls', days_ago_start: 1, days_ago_end: 0 })
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/HTTP 429.*Try again in 1 s\./);
+  });
+
+  it('reports 60 s for a 429 without Retry-After, and leaves a bare 503 unchanged', async () => {
+    fetchMock.mockResolvedValue(limited());
+    await expect(runWithCredentials(creds, () => request(creds, 'POST', '/contacts', { body: {} }))).rejects.toThrow(
+      /HTTP 429.*Try again in 60 s\./
+    );
+
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(jsonResponse({ message: 'down' }, 503));
+    await expect(runWithCredentials(creds, () => request(creds, 'GET', '/company'))).rejects.toThrow(
+      /^Dialpad GET \/company failed: HTTP 503 - down$/
+    );
   });
 });

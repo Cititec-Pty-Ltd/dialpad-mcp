@@ -47,6 +47,9 @@ export function parseJsonKeepingBigIds(text: string): unknown {
   return JSON.parse(quoted);
 }
 
+/** Wait reported for a 429 without Retry-After. */
+const DEFAULT_RETRY_AFTER_SECONDS = 60;
+
 export async function request<T>(
   creds: DialpadCredentials,
   method: HttpMethod,
@@ -56,9 +59,9 @@ export async function request<T>(
   if (!path.startsWith('/')) throw new Error(`Dialpad path must start with /: ${path}`);
   const qs = options.query ? buildQuery(options.query).toString() : '';
   const url = `${BASE_URL}${path}${qs ? `?${qs}` : ''}`;
-  // A short 429 is retried (bounded, honouring Retry-After) inside
-  // fetchWithRateLimitRetry; each attempt gets its own timeout. Dialpad does
-  // not process a request it rate-limits, so retrying a write is safe.
+  // A short 429 on a read is retried (bounded, honouring Retry-After) inside
+  // fetchWithRateLimitRetry; each attempt gets its own timeout. Writes are
+  // never replayed (see rate-limit.ts).
   const res = await fetchWithRateLimitRetry(url, `${method} ${path}`, () => ({
     method,
     headers: {
@@ -84,8 +87,8 @@ export async function request<T>(
     const retryAfterSeconds = retryAfterSecondsOf(res);
     throw new DialpadRateLimitError(
       `Dialpad rate-limited the request (HTTP 429): ${method} ${path}.` +
-        (retryAfterSeconds !== undefined ? ` Try again in ${retryAfterSeconds} s.` : ' Wait a minute and try again.'),
-      retryAfterSeconds
+        ` Try again in ${retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS} s.`,
+      retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS
     );
   }
   if (!res.ok) {
@@ -96,8 +99,11 @@ export async function request<T>(
     } catch {
       // no JSON body
     }
+    // A 503 that still carries Retry-After keeps the requested wait.
+    const wait = res.status === 503 ? retryAfterSecondsOf(res) : undefined;
     throw new DialpadApiError(
-      `Dialpad ${method} ${path} failed: HTTP ${res.status}${detail ? ` - ${String(detail).slice(0, 300)}` : ''}`,
+      `Dialpad ${method} ${path} failed: HTTP ${res.status}${detail ? ` - ${String(detail).slice(0, 300)}` : ''}` +
+        (wait !== undefined ? `. Try again in ${wait} s.` : ''),
       res.status
     );
   }

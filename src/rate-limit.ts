@@ -9,6 +9,12 @@ import { logger } from './utils/logger.js';
  * retry backs off 1 s, then 2 s, with jitter. A long wait is not taken: the
  * caller gets the 429 at once, so a tool call is never held for minutes.
  * A 503 is retried only when it carries Retry-After.
+ *
+ * Only replay-safe methods (GET/HEAD/OPTIONS) are retried (RFC 9110 9.2.2).
+ * Dialpad does not document that a rate-limited write was rejected before it
+ * ran, and a 503 does not prove a write had no effect, so a POST, PATCH or
+ * DELETE is never sent twice: it fails at once and the error says how long
+ * to wait.
  */
 export const RATE_LIMIT_RETRY = {
   /** Retries after the first attempt. */
@@ -64,16 +70,22 @@ export const sleep = (ms: number): Promise<void> => new Promise((resolve) => set
  * attempt so each one gets a fresh timeout signal. Returns the last
  * response, which may still be a 429 for the caller to report.
  */
+/** Methods that may be replayed: they cannot create or change anything. */
+const REPLAY_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export async function fetchWithRateLimitRetry(
   url: string,
   label: string,
   makeInit: () => RequestInit
 ): Promise<Response> {
-  let res = await fetch(url, makeInit());
+  const init = makeInit();
+  const replaySafe = REPLAY_SAFE_METHODS.has((init.method ?? 'GET').toUpperCase());
+  let res = await fetch(url, init);
   let waitedMs = 0;
   for (let attempt = 0; ; attempt++) {
     const retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
-    const retryable = res.status === 429 || (res.status === 503 && retryAfterMs !== undefined);
+    const retryable =
+      replaySafe && (res.status === 429 || (res.status === 503 && retryAfterMs !== undefined));
     if (!retryable) return res;
     const delay = retryDelayMs(attempt, retryAfterMs, waitedMs);
     if (delay === undefined) return res;
