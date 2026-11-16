@@ -59,6 +59,16 @@ export interface ToolSpec {
   validate?: (args: Record<string, unknown>) => void;
   /** Trims the Dialpad response. Receives the parsed body and the tool arguments. */
   shape?: (data: unknown, args: Record<string, unknown>) => unknown;
+  /**
+   * For read tools that need several requests (e.g. a search that pages through calls).
+   * Gets the validated request built from `params` plus a GET-only fetcher; the
+   * method and path above are the first request it makes. Only allowed with kind 'read'.
+   */
+  run?: (
+    first: { path: string; query: Record<string, unknown> },
+    args: Record<string, unknown>,
+    get: <T>(path: string, query?: Record<string, unknown>) => Promise<T>
+  ) => Promise<unknown>;
 }
 
 const LIST_TYPES: ParamType[] = ['e164_list', 'string_list'];
@@ -208,6 +218,11 @@ export async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Pr
   if (missing) return missing;
   try {
     const { path, query, body } = buildRequest(spec, args);
+    if (spec.run) {
+      if (spec.kind !== 'read' || spec.method !== 'GET') throw new Error(`${spec.name}: run is only allowed for GET read tools`);
+      const get = <T>(p: string, q?: Record<string, unknown>) => request<T>(creds!, 'GET', p, { query: q });
+      return textResult(await spec.run({ path, query }, args, get));
+    }
     const data = await request<unknown>(creds!, spec.method, path, { query, body });
     return textResult(spec.shape ? spec.shape(data, args) : data);
   } catch (err) {
