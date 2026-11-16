@@ -40,6 +40,9 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   dialpad_get_callcenter_status: { id: '123' },
   dialpad_get_call: { id: '123' },
   dialpad_get_call_transcript: { call_id: '123' },
+  dialpad_get_call_ai_recap: { id: '123' },
+  dialpad_search_calls: { query: 'acme' },
+  dialpad_search_contacts: { name: 'acme' },
   dialpad_get_contact: { id: 'abc123' },
   dialpad_get_number: { number: '+61299999999' },
   dialpad_create_stats_export: { export_type: 'records', stat_type: 'calls' },
@@ -68,6 +71,9 @@ describe('tool scope', () => {
         'dialpad_get_callcenter_status',
         'dialpad_list_calls',
         'dialpad_get_call',
+        'dialpad_get_call_ai_recap',
+        'dialpad_search_calls',
+        'dialpad_search_contacts',
         'dialpad_get_call_transcript',
         'dialpad_list_contacts',
         'dialpad_get_contact',
@@ -98,12 +104,15 @@ describe('tool scope', () => {
     expect([...SENSITIVE_TOOL_NAMES].sort()).toEqual([
       'dialpad_create_stats_export',
       'dialpad_get_call',
+      'dialpad_get_call_ai_recap',
       'dialpad_get_call_transcript',
       'dialpad_get_contact',
       'dialpad_get_stats_export',
       'dialpad_list_calls',
       'dialpad_list_contacts',
       'dialpad_list_webhooks',
+      'dialpad_search_calls',
+      'dialpad_search_contacts',
     ]);
     expect(READ_TOOL_NAMES.length + WRITE_TOOL_NAMES.length).toBe(ALL_TOOLS.length);
   });

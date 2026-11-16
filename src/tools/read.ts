@@ -1,6 +1,7 @@
 import { CURSOR_PARAM, FULL_PARAM, shapePage } from './spec.js';
 import type { ParamSpec, ToolSpec } from './spec.js';
 import { InputError, pick } from './shared.js';
+import { DEFAULT_MAX_CALLS, DEFAULT_RECAP_READS, MAX_CALLS_LIMIT, MAX_RECAP_READS, searchCalls } from './search.js';
 
 // Read tools. Each one sends GET to a fixed /api/v2 path, except
 // dialpad_create_stats_export, which POSTs a report request (it starts a
@@ -313,8 +314,126 @@ export const READ_SPECS: ToolSpec[] = [
       };
     },
   },
+  {
+    name: 'dialpad_get_call_ai_recap',
+    description:
+      "Get one call's Dialpad AI recap: summary, action items, purposes and disposition. Dialpad allows about 12 per minute." +
+      PII_NOTE,
+    kind: 'read',
+    method: 'GET',
+    path: '/call/{id}/ai_recap',
+    sensitive: true,
+    params: {
+      id: idParam('Call'),
+      summary_format: {
+        type: 'string',
+        in: 'query',
+        enum: ['bullet', 'short', 'medium', 'long'],
+        description: 'Summary length and style (Dialpad default: medium).',
+      },
+    },
+    shape: (data) => {
+      const d = (data ?? {}) as Record<string, unknown>;
+      const contents = (list: unknown) =>
+        Array.isArray(list) ? list.map((i) => pick(i, ['content', 'category'])).filter((i) => Object.keys(i).length) : [];
+      return {
+        ...pick(d, ['call_id', 'date_created', 'is_internal_call']),
+        summary: pick(d.summary, ['content', 'format', 'edited']),
+        action_items: contents(d.action_items),
+        purposes: contents(d.purposes),
+        disposition: pick(d.disposition, ['content']),
+      };
+    },
+  },
+  {
+    name: 'dialpad_search_calls',
+    description:
+      "Search finished calls for text. Dialpad's API cannot search calls itself, so this lists calls in a date range " +
+      '(default the last 30 days; optionally one user, office or call center via target_id/target_type) and matches the text ' +
+      "against the contact name, contact phone and external number. With search_recaps it also reads the AI recap of up to " +
+      `max_recap_reads (default ${DEFAULT_RECAP_READS}, at most ${MAX_RECAP_READS}) further connected calls, newest first, ` +
+      'and matches the summary, action items and purposes. Recap reads are slow (about 12 per minute), so narrow the date range ' +
+      'or target to search recaps over more calls. Returns the matching calls with where each matched.' +
+      PII_NOTE,
+    kind: 'read',
+    method: 'GET',
+    path: '/call',
+    sensitive: true,
+    params: {
+      query: {
+        type: 'string',
+        in: 'local',
+        required: true,
+        maxLength: 100,
+        description: 'Text to find: a contact or company name, part of a phone number, or words in the AI recap.',
+      },
+      started_after: {
+        type: 'time',
+        in: 'query',
+        description: 'Only calls that started after this time (ISO 8601 or epoch ms). Default: 30 days ago.',
+      },
+      started_before: {
+        type: 'time',
+        in: 'query',
+        description: 'Only calls that started before this time (ISO 8601 or epoch ms).',
+      },
+      target_id: { type: 'id', in: 'query', description: 'Only calls for this target ID. Needs target_type.' },
+      target_type: { type: 'string', in: 'query', enum: TARGET_TYPES, description: 'Type of target_id.' },
+      search_recaps: {
+        type: 'boolean',
+        in: 'local',
+        description: 'Also search the AI recap text of recent connected calls that did not match on name or number.',
+      },
+      max_calls: {
+        type: 'int',
+        in: 'local',
+        min: 1,
+        max: MAX_CALLS_LIMIT,
+        description: `Most calls to scan (default ${DEFAULT_MAX_CALLS}).`,
+      },
+      max_recap_reads: {
+        type: 'int',
+        in: 'local',
+        min: 1,
+        max: MAX_RECAP_READS,
+        description: `Most AI recaps to read when search_recaps is set (default ${DEFAULT_RECAP_READS}).`,
+      },
+    },
+    validate: (a) => {
+      if (typeof a.query === 'string' && a.query.trim().length < 2) throw new InputError('query must be at least 2 characters');
+      if (a.target_id !== undefined && a.target_type === undefined) {
+        throw new InputError('target_type is required when target_id is set');
+      }
+    },
+    run: (first, args, get) => searchCalls(first, args, get, trimCall),
+  },
 
   // ---------------------------------------------------------------- contacts
+  {
+    name: 'dialpad_search_contacts',
+    description:
+      "Search Dialpad contacts (local, shared and lead) by name, phone or email. name matches the start of each word, so 'intouch' finds " +
+      "'InTouch Health'. phone must be the full E.164 number; email the full address. Use the contact's phones with dialpad_search_calls." +
+      PII_NOTE,
+    kind: 'read',
+    method: 'GET',
+    path: '/contacts/search',
+    sensitive: true,
+    params: {
+      name: { type: 'string', in: 'query', maxLength: 100, description: 'Name text; each word must match the start of a word in the name.' },
+      phone: { type: 'e164', in: 'query', description: 'Full phone number in E.164 format.' },
+      email: { type: 'string', in: 'query', maxLength: 200, description: 'Full email address (not case-sensitive).' },
+      limit: { type: 'int', in: 'query', min: 1, max: 100, description: 'Results per page (Dialpad default 25).' },
+      cursor: CURSOR_PARAM,
+      full: FULL_PARAM,
+    },
+    validate: (a) => {
+      if (a.name === undefined && a.phone === undefined && a.email === undefined) {
+        throw new InputError('Give name, phone or email');
+      }
+    },
+    shape: shapePage((c) => pick(c, CONTACT_FIELDS)),
+  },
   {
     name: 'dialpad_list_contacts',
     description:

@@ -22,7 +22,10 @@ Reads send `GET` to a fixed path. IDs are checked and URL-encoded, and no tool a
 | `dialpad_list_calls` | `GET /call` (start time range, target) | yes |
 | `dialpad_get_call` | `GET /call/{id}` (Dialpad allows 10 a minute) | yes |
 | `dialpad_get_call_transcript` | `GET /transcripts/{call_id}` | yes |
+| `dialpad_get_call_ai_recap` | `GET /call/{id}/ai_recap` (about 12/min) | yes |
+| `dialpad_search_calls` | `GET /call` (paged) + `GET /call/{id}/ai_recap`. Dialpad has no call text search, so it matches contact name, phone and external number client-side, and with `search_recaps` the AI recap of up to 10 more connected calls (5 s apart) | yes |
 | `dialpad_list_contacts` / `dialpad_get_contact` | `GET /contacts`, `/contacts/{id}` | yes |
+| `dialpad_search_contacts` | `GET /contacts/search` (name word-prefix, full phone or email) | yes |
 | `dialpad_list_numbers` / `dialpad_get_number` | `GET /numbers`, `/numbers/{number}` (company admin key) | |
 | `dialpad_create_stats_export` | `POST /stats`: starts a report job and changes no Dialpad data | yes |
 | `dialpad_get_stats_export` | `GET /stats/{id}`: status and download link | yes |
