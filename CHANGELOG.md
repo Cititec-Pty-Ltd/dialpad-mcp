@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `dialpad_search_calls` stops itself before the MCP host's 60 s tool-call limit and returns what it found. Listing calls stops at about 40 s (about 20 s when `search_recaps` is set, leaving time for recaps), and recap reads stop before 40 s in total. The result then has `time_limited: true` and a note with how far back the listing got. Before, a wide date range ran past the host limit and returned nothing.
 - New read tools for finding calls. Dialpad's API has no text search over calls, transcripts or AI recaps, so:
   - `dialpad_search_calls` lists calls in a date range (default the last 30 days, optionally one target) and matches the text against the contact name, contact phone and external number. With `search_recaps` it also reads the AI recap of up to `max_recap_reads` (default 8, at most 10) more connected calls, 5 s apart (Dialpad allows about 12 per minute; the Cititec MCP host gives each tool call 60 s), and matches the summary, action items and purposes. It reports what it did not check.
   - `dialpad_get_call_ai_recap` returns one call's AI recap (summary, action items, purposes, disposition).

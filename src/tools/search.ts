@@ -20,18 +20,47 @@ export const MAX_CALLS_LIMIT = 2000;
 export const DEFAULT_RECAP_READS = 8;
 export const MAX_RECAP_READS = 10;
 export const RECAP_GAP_MS = 5000;
+/**
+ * The MCP host ends a tool call after 60 s and returns nothing, so the search
+ * stops itself well before that and returns what it has, saying how far it got.
+ * Listing gets the whole budget, or about half when recaps are also searched.
+ * Each check leaves REQUEST_RESERVE_MS for the request it is about to make.
+ */
+export const TIME_BUDGET_MS = 40_000;
+export const LIST_BUDGET_WITH_RECAPS_MS = 20_000;
+export const REQUEST_RESERVE_MS = 5_000;
+/**
+ * Hard stop for any single request. A request can take up to 20 s and, on a short
+ * 429, wait and retry, so checks between requests are not enough: every request
+ * races a timer for the time left before this deadline, and the search returns
+ * what it has when the timer wins (the request is abandoned, not awaited).
+ */
+export const HARD_DEADLINE_MS = 50_000;
 /** A query made only of digits and phone punctuation (+, spaces, brackets, dots, dashes). */
 export const PHONE_LIKE = /^[+\d\s().-]+$/;
 
 export interface SearchDeps {
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  /** A cancellable timer for the per-request deadline. Defaults to setTimeout. */
+  timer?: (ms: number) => { promise: Promise<void>; cancel: () => void };
+}
+
+function realTimer(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<void>((resolve) => {
+    handle = setTimeout(resolve, ms);
+  });
+  return { promise, cancel: () => clearTimeout(handle) };
 }
 
 const defaultDeps: SearchDeps = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
+  timer: realTimer,
 };
+
+const TIME_UP: unique symbol = Symbol('time up');
 
 type Get = <T>(path: string, query?: Record<string, unknown>) => Promise<T>;
 type Call = Record<string, unknown>;
@@ -100,9 +129,46 @@ export async function searchCalls(
   let scanned = 0;
   let cursor: string | null | undefined;
   let more = false;
+  let outOfTime = false;
+  let oldestStarted: unknown;
+  const started = deps.now();
+  const elapsed = () => deps.now() - started;
+  const listBudget = searchRecaps ? LIST_BUDGET_WITH_RECAPS_MS : TIME_BUDGET_MS;
+  const timer = deps.timer ?? realTimer;
+
+  /** Races a request against the time left before HARD_DEADLINE_MS. */
+  async function bounded<T>(request: () => Promise<T>): Promise<T | typeof TIME_UP> {
+    const left = HARD_DEADLINE_MS - elapsed();
+    if (left <= 0) return TIME_UP;
+    const t = timer(left);
+    try {
+      return await Promise.race([request(), t.promise.then((): typeof TIME_UP => TIME_UP)]);
+    } finally {
+      t.cancel();
+    }
+  }
 
   do {
-    const page = await get<DialpadPage<Call>>(first.path, cursor ? { ...query, cursor } : query);
+    if (scanned > 0 && elapsed() + REQUEST_RESERVE_MS > listBudget) {
+      outOfTime = true;
+      break;
+    }
+    let page: DialpadPage<Call> | typeof TIME_UP;
+    try {
+      page = await bounded(() => get<DialpadPage<Call>>(first.path, cursor ? { ...query, cursor } : query));
+    } catch (err) {
+      // A rate limit part-way through keeps what was found; on the first page there is nothing to keep.
+      if (err instanceof DialpadRateLimitError && scanned > 0) {
+        notes.push(`Stopped listing: Dialpad rate-limited the request. Try again in ${err.retryAfterSeconds ?? 60} s.`);
+        outOfTime = true;
+        break;
+      }
+      throw err;
+    }
+    if (page === TIME_UP) {
+      outOfTime = true;
+      break;
+    }
     const items = Array.isArray(page?.items) ? page.items : [];
     for (const c of items) {
       if (scanned >= maxCalls) {
@@ -110,6 +176,7 @@ export async function searchCalls(
         break;
       }
       scanned++;
+      if (c.date_started !== undefined) oldestStarted = c.date_started;
       const where = callMatch(c, needle, digits);
       if (where) matches.push({ ...trim(c), matched_on: where });
       else if (c.date_connected) unmatchedConnected.push(c);
@@ -123,6 +190,14 @@ export async function searchCalls(
       `Stopped after ${scanned} calls (max_calls). Narrow the date range or raise max_calls (up to ${MAX_CALLS_LIMIT}) to search further.`
     );
   }
+  if (outOfTime) {
+    const back = typeof oldestStarted === 'number' || typeof oldestStarted === 'string'
+      ? ` back to ${new Date(Number(oldestStarted)).toISOString()}` : '';
+    notes.push(
+      `Stopped listing at the time limit after ${scanned} calls (searched${back}; older calls in the range were not checked). ` +
+        'Narrow the date range (started_after/started_before) or pick one user or call center (target_id) to search the rest.'
+    );
+  }
 
   let recapReads = 0;
   // Calls whose recap was actually checked: read successfully, or confirmed to have none (404).
@@ -132,10 +207,19 @@ export async function searchCalls(
     for (const c of toRead) {
       const id = c.call_id ?? c.id;
       if (id === undefined || id === null) continue;
-      if (recapReads > 0) await deps.sleep(RECAP_GAP_MS);
+      const gap = recapReads > 0 ? RECAP_GAP_MS : 0;
+      if (elapsed() + gap + REQUEST_RESERVE_MS > TIME_BUDGET_MS) {
+        notes.push('Stopped reading AI recaps at the time limit.');
+        break;
+      }
+      if (gap) await deps.sleep(gap);
       recapReads++;
       try {
-        const recap = await get<unknown>(`/call/${encodeURIComponent(String(id))}/ai_recap`);
+        const recap = await bounded(() => get<unknown>(`/call/${encodeURIComponent(String(id))}/ai_recap`));
+        if (recap === TIME_UP) {
+          notes.push('Stopped reading AI recaps at the time limit.');
+          break;
+        }
         recapChecked++;
         const body = recapText(recap);
         if (body.toLowerCase().includes(needle)) {
@@ -177,6 +261,7 @@ export async function searchCalls(
     started_after: query.started_after,
     ...(query.started_before !== undefined ? { started_before: query.started_before } : {}),
     calls_scanned: scanned,
+    ...(outOfTime || notes.includes('Stopped reading AI recaps at the time limit.') ? { time_limited: true } : {}),
     recap_reads: recapReads,
     recaps_checked: recapChecked,
     match_count: matches.length,
