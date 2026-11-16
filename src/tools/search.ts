@@ -29,18 +29,38 @@ export const RECAP_GAP_MS = 5000;
 export const TIME_BUDGET_MS = 40_000;
 export const LIST_BUDGET_WITH_RECAPS_MS = 20_000;
 export const REQUEST_RESERVE_MS = 5_000;
+/**
+ * Hard stop for any single request. A request can take up to 20 s and, on a short
+ * 429, wait and retry, so checks between requests are not enough: every request
+ * races a timer for the time left before this deadline, and the search returns
+ * what it has when the timer wins (the request is abandoned, not awaited).
+ */
+export const HARD_DEADLINE_MS = 50_000;
 /** A query made only of digits and phone punctuation (+, spaces, brackets, dots, dashes). */
 export const PHONE_LIKE = /^[+\d\s().-]+$/;
 
 export interface SearchDeps {
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  /** A cancellable timer for the per-request deadline. Defaults to setTimeout. */
+  timer?: (ms: number) => { promise: Promise<void>; cancel: () => void };
+}
+
+function realTimer(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<void>((resolve) => {
+    handle = setTimeout(resolve, ms);
+  });
+  return { promise, cancel: () => clearTimeout(handle) };
 }
 
 const defaultDeps: SearchDeps = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
+  timer: realTimer,
 };
+
+const TIME_UP: unique symbol = Symbol('time up');
 
 type Get = <T>(path: string, query?: Record<string, unknown>) => Promise<T>;
 type Call = Record<string, unknown>;
@@ -114,13 +134,41 @@ export async function searchCalls(
   const started = deps.now();
   const elapsed = () => deps.now() - started;
   const listBudget = searchRecaps ? LIST_BUDGET_WITH_RECAPS_MS : TIME_BUDGET_MS;
+  const timer = deps.timer ?? realTimer;
+
+  /** Races a request against the time left before HARD_DEADLINE_MS. */
+  async function bounded<T>(request: () => Promise<T>): Promise<T | typeof TIME_UP> {
+    const left = HARD_DEADLINE_MS - elapsed();
+    if (left <= 0) return TIME_UP;
+    const t = timer(left);
+    try {
+      return await Promise.race([request(), t.promise.then((): typeof TIME_UP => TIME_UP)]);
+    } finally {
+      t.cancel();
+    }
+  }
 
   do {
     if (scanned > 0 && elapsed() + REQUEST_RESERVE_MS > listBudget) {
       outOfTime = true;
       break;
     }
-    const page = await get<DialpadPage<Call>>(first.path, cursor ? { ...query, cursor } : query);
+    let page: DialpadPage<Call> | typeof TIME_UP;
+    try {
+      page = await bounded(() => get<DialpadPage<Call>>(first.path, cursor ? { ...query, cursor } : query));
+    } catch (err) {
+      // A rate limit part-way through keeps what was found; on the first page there is nothing to keep.
+      if (err instanceof DialpadRateLimitError && scanned > 0) {
+        notes.push(`Stopped listing: Dialpad rate-limited the request. Try again in ${err.retryAfterSeconds ?? 60} s.`);
+        outOfTime = true;
+        break;
+      }
+      throw err;
+    }
+    if (page === TIME_UP) {
+      outOfTime = true;
+      break;
+    }
     const items = Array.isArray(page?.items) ? page.items : [];
     for (const c of items) {
       if (scanned >= maxCalls) {
@@ -167,7 +215,11 @@ export async function searchCalls(
       if (gap) await deps.sleep(gap);
       recapReads++;
       try {
-        const recap = await get<unknown>(`/call/${encodeURIComponent(String(id))}/ai_recap`);
+        const recap = await bounded(() => get<unknown>(`/call/${encodeURIComponent(String(id))}/ai_recap`));
+        if (recap === TIME_UP) {
+          notes.push('Stopped reading AI recaps at the time limit.');
+          break;
+        }
         recapChecked++;
         const body = recapText(recap);
         if (body.toLowerCase().includes(needle)) {

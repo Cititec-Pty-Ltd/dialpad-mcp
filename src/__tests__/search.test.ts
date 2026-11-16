@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
 import { runWithCredentials } from '../client.js';
 import { RECAP_GAP_MS, callMatch, recapText, searchCalls } from '../tools/search.js';
-import { DialpadApiError, DialpadAuthError } from '../types.js';
+import { DialpadApiError, DialpadAuthError, DialpadRateLimitError } from '../types.js';
 import { jsonResponse, textOf } from './test-helpers.js';
 
 const creds = { apiKey: 'test-key' };
@@ -250,5 +250,67 @@ describe('searchCalls time budget', () => {
     const out = (await searchCalls({ path: '/call', query: {} }, { query: 'intouch' }, get, trim, noSleep)) as any;
     expect(out.time_limited).toBeUndefined();
     expect(out.calls_scanned).toBe(4);
+  });
+});
+
+describe('searchCalls hard deadline', () => {
+  const never = new Promise<never>(() => {});
+  // Timer that fires at once only after `after` ms of fake time; otherwise never.
+  function deadlineDeps(after: number) {
+    let t = NOW;
+    return {
+      advance: (ms: number) => { t += ms; },
+      deps: {
+        now: () => t,
+        sleep: async (ms: number) => { t += ms; },
+        timer: () => (t - NOW >= after ? { promise: Promise.resolve(), cancel: () => {} } : { promise: never, cancel: () => {} }),
+      },
+    };
+  }
+
+  it('returns what it found when a listing request hangs past the deadline', async () => {
+    const { advance, deps } = deadlineDeps(30_000);
+    const get = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        advance(30_000);
+        return { items: [calls[0]], cursor: 'more' };
+      })
+      .mockImplementationOnce(() => never); // slow request / retry that would pass the host limit
+    const out = (await searchCalls({ path: '/call', query: {} }, { query: 'intouch' }, get, trim, deps)) as any;
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(out.matches).toEqual([{ call_id: '1', matched_on: 'contact_name' }]);
+    expect(out.time_limited).toBe(true);
+  });
+
+  it('stops reading recaps when a recap request hangs past the deadline', async () => {
+    const { advance, deps } = deadlineDeps(10_000);
+    const get = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        advance(10_000);
+        return { items: calls, cursor: null };
+      })
+      .mockImplementation(() => never);
+    const out = (await searchCalls(
+      { path: '/call', query: {} },
+      { query: 'nomatch', search_recaps: true },
+      get,
+      trim,
+      deps
+    )) as any;
+    expect(out.recaps_checked).toBe(0);
+    expect(out.time_limited).toBe(true);
+    expect(out.notes.join(' ')).toMatch(/Stopped reading AI recaps at the time limit/);
+  });
+
+  it('keeps earlier pages when a later listing request is rate-limited', async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [calls[0]], cursor: 'more' })
+      .mockRejectedValueOnce(new DialpadRateLimitError('429', 30));
+    const out = (await searchCalls({ path: '/call', query: {} }, { query: 'intouch' }, get, trim, noSleep)) as any;
+    expect(out.match_count).toBe(1);
+    expect(out.notes.join(' ')).toMatch(/rate-limited the request\. Try again in 30 s/);
   });
 });
