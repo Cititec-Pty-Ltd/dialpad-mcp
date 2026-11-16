@@ -54,6 +54,15 @@ describe('searchCalls', () => {
     expect(out.recap_reads).toBe(0);
   });
 
+  it('matches numbers only for phone-like queries, not digits inside text', async () => {
+    const items = [{ call_id: '9', contact: { name: 'Unrelated' }, external_number: '+61270011234' }];
+    const get = vi.fn().mockResolvedValue({ items, cursor: null });
+    const text = (await searchCalls({ path: '/call', query: {} }, { query: 'ISO 27001' }, get, trim, noSleep)) as any;
+    expect(text.match_count).toBe(0);
+    const phone = (await searchCalls({ path: '/call', query: {} }, { query: '(02) 7001 1234' }, get, trim, noSleep)) as any;
+    expect(phone.matches).toEqual([{ call_id: '9', matched_on: 'number' }]);
+  });
+
   it('stops at max_calls and says so', async () => {
     const get = vi.fn().mockResolvedValueOnce({ items: calls, cursor: 'more' });
     const out = (await searchCalls({ path: '/call', query: {} }, { query: 'zzz', max_calls: 2 }, get, trim, noSleep)) as any;

@@ -20,6 +20,8 @@ export const MAX_CALLS_LIMIT = 2000;
 export const DEFAULT_RECAP_READS = 8;
 export const MAX_RECAP_READS = 10;
 export const RECAP_GAP_MS = 5000;
+/** A query made only of digits and phone punctuation (+, spaces, brackets, dots, dashes). */
+export const PHONE_LIKE = /^[+\d\s().-]+$/;
 
 export interface SearchDeps {
   sleep: (ms: number) => Promise<void>;
@@ -47,8 +49,11 @@ export function callMatch(call: Call, needle: string, digits: string): string | 
   const contact = call.contact;
   if (text(field(contact, 'name')).toLowerCase().includes(needle)) return 'contact_name';
   if (digits.length >= 4) {
+    // Dialpad stores E.164 (+61 2 ...); a locally written number (02 ...) has a trunk 0 to drop.
+    const forms = digits.startsWith('0') && digits.length > 4 ? [digits, digits.slice(1)] : [digits];
     for (const n of [field(contact, 'phone'), call.external_number]) {
-      if (text(n).replace(/\D/g, '').includes(digits)) return 'number';
+      const d = text(n).replace(/\D/g, '');
+      if (forms.some((f) => d.includes(f))) return 'number';
     }
   }
   return null;
@@ -73,7 +78,9 @@ export async function searchCalls(
 ): Promise<unknown> {
   const raw = text(args.query).trim();
   const needle = raw.toLowerCase();
-  const digits = raw.replace(/\D/g, '');
+  // Match numbers by digits only when the query looks like a phone number; for text such as
+  // "ISO 27001" the digits must not match unrelated phone numbers.
+  const digits = PHONE_LIKE.test(raw) ? raw.replace(/\D/g, '') : '';
   const maxCalls = typeof args.max_calls === 'number' ? args.max_calls : DEFAULT_MAX_CALLS;
   const searchRecaps = args.search_recaps === true;
   const maxRecaps = typeof args.max_recap_reads === 'number' ? args.max_recap_reads : DEFAULT_RECAP_READS;
