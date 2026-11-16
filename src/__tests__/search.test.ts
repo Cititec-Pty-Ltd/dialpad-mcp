@@ -103,7 +103,27 @@ describe('searchCalls', () => {
     )) as any;
     expect(get).toHaveBeenCalledTimes(2);
     expect(out.notes.join(' ')).toMatch(/ai_recap scope/);
-    expect(out.notes.join(' ')).toMatch(/2 more were not checked/);
+    // The one attempted read failed, so nothing was checked: all 3 connected, unmatched calls are unchecked.
+    expect(out.recaps_checked).toBe(0);
+    expect(out.notes.join(' ')).toMatch(/checked for 0 of the 3 .* 3 were not checked/);
+  });
+
+  it('reports actual coverage when recap reads stop early', async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({ items: calls, cursor: null })
+      .mockResolvedValueOnce({ summary: { content: 'nothing relevant' } })
+      .mockRejectedValueOnce(new DialpadAuthError('forbidden', 403));
+    const out = (await searchCalls(
+      { path: '/call', query: {} },
+      { query: 'nomatch', search_recaps: true },
+      get,
+      trim,
+      noSleep
+    )) as any;
+    expect(out.recap_reads).toBe(2);
+    expect(out.recaps_checked).toBe(1);
+    expect(out.notes.join(' ')).toMatch(/checked for 1 of the 3 .* 2 were not checked/);
   });
 });
 

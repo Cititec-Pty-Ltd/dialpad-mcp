@@ -118,6 +118,8 @@ export async function searchCalls(
   }
 
   let recapReads = 0;
+  // Calls whose recap was actually checked: read successfully, or confirmed to have none (404).
+  let recapChecked = 0;
   if (searchRecaps) {
     const toRead = unmatchedConnected.slice(0, maxRecaps);
     for (const c of toRead) {
@@ -127,6 +129,7 @@ export async function searchCalls(
       recapReads++;
       try {
         const recap = await get<unknown>(`/call/${encodeURIComponent(String(id))}/ai_recap`);
+        recapChecked++;
         const body = recapText(recap);
         if (body.toLowerCase().includes(needle)) {
           matches.push({
@@ -136,7 +139,10 @@ export async function searchCalls(
           });
         }
       } catch (err) {
-        if (err instanceof DialpadApiError && err.status === 404) continue; // no recap for this call
+        if (err instanceof DialpadApiError && err.status === 404) {
+          recapChecked++; // no recap for this call
+          continue;
+        }
         if (err instanceof DialpadAuthError) {
           notes.push('AI recaps could not be read: the Dialpad API key may be missing the ai_recap scope.');
           break;
@@ -148,10 +154,10 @@ export async function searchCalls(
         throw err;
       }
     }
-    const left = unmatchedConnected.length - toRead.length;
+    const left = unmatchedConnected.length - recapChecked;
     if (left > 0) {
       notes.push(
-        `AI recaps were read for the ${toRead.length} most recent connected calls that did not already match; ${left} more were not checked. ` +
+        `AI recaps were checked for ${recapChecked} of the ${unmatchedConnected.length} connected calls that did not already match; ${left} were not checked. ` +
           `Dialpad allows about 12 recap reads per minute, so search a shorter date range, or one user or call center (target_id), to check others.`
       );
     }
@@ -165,6 +171,7 @@ export async function searchCalls(
     ...(query.started_before !== undefined ? { started_before: query.started_before } : {}),
     calls_scanned: scanned,
     recap_reads: recapReads,
+    recaps_checked: recapChecked,
     match_count: matches.length,
     matches,
     ...(notes.length ? { notes } : {}),
