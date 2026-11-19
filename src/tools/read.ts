@@ -96,7 +96,8 @@ function stripWebhookSecret(w: unknown): unknown {
   return copy;
 }
 
-function trimSubscription(s: Record<string, unknown>): Record<string, unknown> {
+/** Keeps a call subscription's settings and the webhook's ID and URL only (never its signing secret). */
+export function trimSubscription(s: Record<string, unknown>): Record<string, unknown> {
   const out = pick(s, ['id', 'enabled', 'call_states', 'group_calls_only', 'target_id', 'target_type']);
   const hook = pick(s.webhook, ['id', 'hook_url']);
   if (Object.keys(hook).length) out.webhook = hook;

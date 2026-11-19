@@ -44,6 +44,8 @@ Only the changes Cititec's N8N workflows already make are included. Each one is 
 | `dialpad_send_sms` | `POST /sms` to a channel or up to 10 numbers | workflow alerts to a Dialpad channel; texts from the call-to-ticket workflow |
 | `dialpad_update_call_subscription` | `PATCH /subscriptions/call/{id}` (`enabled`, `call_states` only) | call-to-ticket workflow |
 
+Write results carry no secrets: the call subscription result keeps the webhook ID and URL only (never its signing secret), and a delete returns `{ "deleted": true, "id": ... }`.
+
 Not included: calls, call control, users, offices, number assignment, routing and the rest of Dialpad's admin API.
 
 ### Where the endpoint details come from
@@ -64,7 +66,7 @@ The HTTP transport refuses to start without a real `CONDUIT_S2S_SECRET` and chec
 
 ## Rate limits
 
-Dialpad allows 20 requests per second per company, and 1200 per minute on most endpoints. Some limits are lower: call details 10 a minute, contact create 100 a minute, SMS 100 a minute (800 on Tier 1), stats exports about 200 an hour. A 429 is reported as a rate-limit error, not as a bad key.
+Dialpad allows 20 requests per second per company, and 1200 per minute on most endpoints. Some limits are lower: call details 10 a minute, contact create 100 a minute, SMS 100 a minute (800 on Tier 1), stats exports about 200 an hour. A 429 is reported as a rate-limit error, not as a bad key, with `structuredContent` `{ "error_type": "rate_limited", "retry_after_seconds": N, "tool": "..." }` (fleet 429 policy). A read is retried once when Dialpad sends a `Retry-After` of 10 s or less. A write is never sent twice, on 429 or 503: the error says so, and the change has to be proposed again.
 
 ## Running on the Cititec MCP host
 

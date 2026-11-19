@@ -1,5 +1,6 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { getCredentials, request } from '../client.js';
+import { DialpadRateLimitError } from '../types.js';
 import type { DialpadPage, HttpMethod } from '../types.js';
 import type { CallToolResult } from './types.js';
 import { InputError, errorResult, requireCredentials, textResult, toE164, toEpochMs, toId } from './shared.js';
@@ -226,8 +227,25 @@ export async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Pr
     const data = await request<unknown>(creds!, spec.method, path, { query, body });
     return textResult(spec.shape ? spec.shape(data, args) : data);
   } catch (err) {
+    if (err instanceof DialpadRateLimitError) return rateLimitedResult(spec, err);
     return errorResult((err as Error).message);
   }
+}
+
+/**
+ * Fleet 429 policy: a rate-limited call is a tool error with a typed
+ * envelope, so the client (and the MCP host's cooldown) can tell it from
+ * other failures. Writes are never replayed by this server, so the message
+ * says the change was not retried.
+ */
+export function rateLimitedResult(spec: ToolSpec, err: DialpadRateLimitError): CallToolResult {
+  const retryAfter = err.retryAfterSeconds ?? 60;
+  const note = spec.kind === 'write' ? ' The change was not retried; propose it again after the wait.' : '';
+  return {
+    content: [{ type: 'text', text: `Error: ${err.message}${note}` }],
+    isError: true,
+    structuredContent: { error_type: 'rate_limited', retry_after_seconds: retryAfter, tool: spec.name },
+  };
 }
 
 /** Shapes a list page: trims each item and keeps the cursor for the next page. */

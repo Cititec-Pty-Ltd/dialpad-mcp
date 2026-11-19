@@ -298,6 +298,83 @@ describe('requests match the N8N workflows', () => {
   });
 });
 
+describe('write tools', () => {
+  const WRITES = [
+    'dialpad_create_contact',
+    'dialpad_update_contact',
+    'dialpad_delete_contact',
+    'dialpad_send_sms',
+    'dialpad_update_call_subscription',
+  ];
+
+  it('are annotated as writes, with only the delete destructive; the stats export stays read-only', () => {
+    for (const name of WRITES) {
+      const a = ALL_TOOLS.find((t) => t.name === name)?.annotations;
+      expect(a?.readOnlyHint, name).toBe(false);
+      expect(a?.destructiveHint, name).toBe(name === 'dialpad_delete_contact');
+    }
+    expect(ALL_TOOLS.find((t) => t.name === 'dialpad_create_stats_export')?.annotations?.readOnlyHint).toBe(true);
+  });
+
+  it('never return the webhook signing secret after changing a subscription', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: 5,
+        enabled: false,
+        call_states: ['hangup'],
+        webhook: { id: 9, hook_url: 'https://hooks.example.com/x', signature: { secret: 'shh-secret', algo: 'HS256', type: 'jwt' } },
+      })
+    );
+    const result = await call('dialpad_update_call_subscription', { id: '5', enabled: false });
+    const text = textOf(result);
+    expect(text).not.toContain('shh-secret');
+    expect(text).not.toContain('signature');
+    expect(JSON.parse(text)).toEqual({
+      id: 5,
+      enabled: false,
+      call_states: ['hangup'],
+      webhook: { id: 9, hook_url: 'https://hooks.example.com/x' },
+    });
+  });
+
+  it('say what was deleted, even when Dialpad returns an empty body', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('', { status: 200 }));
+    expect(JSON.parse(textOf(await call('dialpad_delete_contact', { id: 'abc123' })))).toEqual({ deleted: true, id: 'abc123' });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'abc123', display_name: 'Test Person' }));
+    expect(JSON.parse(textOf(await call('dialpad_delete_contact', { id: 'abc123' })))).toEqual({
+      deleted: true,
+      id: 'abc123',
+      contact: { id: 'abc123', display_name: 'Test Person' },
+    });
+  });
+
+  it('are sent once on 429, even with a short Retry-After, and return a rate_limited error', async () => {
+    for (const name of WRITES) {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValue(new Response('{}', { status: 429, headers: { 'Retry-After': '1' } }));
+      const result = await call(name, SAMPLE_ARGS[name]);
+      expect(fetchMock, name).toHaveBeenCalledTimes(1);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({ error_type: 'rate_limited', retry_after_seconds: 1, tool: name });
+      expect(textOf(result)).toMatch(/HTTP 429.*Try again in 1 s\. The change was not retried/);
+    }
+  });
+
+  it('are sent once on 503 too', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 503, headers: { 'Retry-After': '1' } }));
+    const result = await call('dialpad_create_contact', SAMPLE_ARGS.dialpad_create_contact);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+  });
+
+  it('never put the API key in a result or error', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'bad request' } }, 400));
+    const result = await call('dialpad_create_contact', SAMPLE_ARGS.dialpad_create_contact);
+    expect(JSON.stringify(result)).not.toContain(creds.apiKey);
+  });
+});
+
 describe('responses are trimmed', () => {
   it('trims call list items and returns the cursor', async () => {
     fetchMock.mockResolvedValueOnce(
@@ -362,7 +439,9 @@ describe('errors', () => {
     expect(textOf(await call('dialpad_list_numbers'))).toMatch(/company admin key/);
     // Retry-After longer than the client waits for: reported at once, not retried.
     fetchMock.mockResolvedValueOnce(new Response('{}', { status: 429, headers: { 'Retry-After': '60' } }));
-    expect(textOf(await call('dialpad_get_company'))).toMatch(/rate-limited.*Try again in 60 s/);
+    const limited = await call('dialpad_get_company');
+    expect(textOf(limited)).toMatch(/rate-limited.*Try again in 60 s\.$/);
+    expect(limited.structuredContent).toEqual({ error_type: 'rate_limited', retry_after_seconds: 60, tool: 'dialpad_get_company' });
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
