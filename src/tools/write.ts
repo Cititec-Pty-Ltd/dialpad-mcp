@@ -1,5 +1,6 @@
 import type { ParamSpec, ToolSpec } from './spec.js';
 import { InputError } from './shared.js';
+import { trimSubscription } from './read.js';
 
 // Write tools: only the changes Cititec's N8N workflows already make
 // (contact sync from Autotask, notification texts, and pausing the call
@@ -99,6 +100,11 @@ export const WRITE_SPECS: ToolSpec[] = [
     params: {
       id: { type: 'string', in: 'path', required: true, maxLength: 200, description: 'Contact ID.' },
     },
+    // Dialpad may answer with an empty body; always say what was deleted.
+    shape: (data, args) => {
+      const deleted = data && typeof data === 'object' && Object.keys(data).length > 0 ? { contact: data } : {};
+      return { deleted: true, id: String(args.id).trim(), ...deleted };
+    },
   },
   {
     name: 'dialpad_send_sms',
@@ -160,5 +166,7 @@ export const WRITE_SPECS: ToolSpec[] = [
         throw new InputError('Give enabled, call_states or both');
       }
     },
+    // The response includes the webhook, whose signature holds the HMAC signing secret.
+    shape: (d) => trimSubscription((d ?? {}) as Record<string, unknown>),
   },
 ];
